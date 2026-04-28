@@ -148,6 +148,11 @@ public class PlatformController {
         return ResponseEntity.ok("Platform limits updated successfully");
     }
 
+    @GetMapping("/admin/debug")
+    public ResponseEntity<List<Map<String, Object>>> debugDb(HttpServletRequest request) {
+        return ResponseEntity.ok(platformService.debugDb());
+    }
+
     @PostMapping("/admin/approve-coadmin")
     public ResponseEntity<String> approveCoAdmin(HttpServletRequest request, @Valid @RequestBody CoAdminApprovalRequest body) {
         platformService.approveCoAdmin(request.getHeader(HttpHeaders.AUTHORIZATION), body);
@@ -173,6 +178,11 @@ public class PlatformController {
     @GetMapping("/modules/{domainId}")
     public List<Map<String, Object>> getModules(HttpServletRequest request, @PathVariable Integer domainId) {
         return platformService.getModules(request.getHeader(HttpHeaders.AUTHORIZATION), domainId);
+    }
+
+    @GetMapping("/module-study/{moduleId}")
+    public ResponseEntity<Map<String, Object>> getModuleStudy(HttpServletRequest request, @PathVariable Integer moduleId) {
+        return ResponseEntity.ok(platformService.getModuleStudy(request.getHeader(HttpHeaders.AUTHORIZATION), moduleId));
     }
 
     @GetMapping("/tests/{moduleId}")

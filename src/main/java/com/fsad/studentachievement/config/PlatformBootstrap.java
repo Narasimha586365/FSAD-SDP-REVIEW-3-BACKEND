@@ -5,6 +5,7 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.boot.CommandLineRunner;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.security.crypto.password.PasswordEncoder;
@@ -17,13 +18,17 @@ import lombok.RequiredArgsConstructor;
 public class PlatformBootstrap implements CommandLineRunner {
 
     public static final String MAIN_ADMIN_EMAIL = "2400030764@kluniversity.in";
-    public static final String MAIN_ADMIN_PASSWORD = "admin@123";
     public static final String MAIN_ADMIN_PHONE = "7207106954";
     public static final String PRIMARY_STUDENT_EMAIL = "ghost586365@gmail.com";
-    public static final String PRIMARY_STUDENT_PASSWORD = "student@123";
 
     private final JdbcTemplate jdbcTemplate;
     private final PasswordEncoder passwordEncoder;
+
+    @Value("${default.admin.password:}")
+    private String defaultAdminPassword;
+
+    @Value("${default.student.password:}")
+    private String defaultStudentPassword;
 
     @Override
     public void run(String... args) {
@@ -49,6 +54,7 @@ public class PlatformBootstrap implements CommandLineRunner {
         addColumnIfMissing("tests", "option_d", "ALTER TABLE tests ADD COLUMN option_d VARCHAR(255)");
         addColumnIfMissing("tests", "correct_answer", "ALTER TABLE tests ADD COLUMN correct_answer VARCHAR(20) DEFAULT 'optionA'");
         addColumnIfMissing("certificates", "module_id", "ALTER TABLE certificates ADD COLUMN module_id INT");
+        addColumnIfMissing("certificates", "attempt_id", "ALTER TABLE certificates ADD COLUMN attempt_id INT");
         addColumnIfMissing("certificates", "achievement_id", "ALTER TABLE certificates ADD COLUMN achievement_id INT");
         addColumnIfMissing("certificates", "score", "ALTER TABLE certificates ADD COLUMN score INT DEFAULT 0");
         addColumnIfMissing("certificates", "file_name", "ALTER TABLE certificates ADD COLUMN file_name VARCHAR(255)");
@@ -62,6 +68,7 @@ public class PlatformBootstrap implements CommandLineRunner {
         if (columnExists("modules", "title")) {
             jdbcTemplate.update("UPDATE modules SET name = title WHERE (name IS NULL OR name = '') AND title IS NOT NULL");
         }
+        migratePlainTextPasswords();
         seedUsers();
         seedActivitiesAndLearning();
         mapExistingDomainActivities();
@@ -77,7 +84,7 @@ public class PlatformBootstrap implements CommandLineRunner {
         jdbcTemplate.execute("CREATE TABLE IF NOT EXISTS modules (id INT AUTO_INCREMENT PRIMARY KEY, title VARCHAR(200), name VARCHAR(200), domain_id INT NOT NULL, content TEXT, question_count INT DEFAULT 20, FOREIGN KEY (domain_id) REFERENCES domains(id) ON DELETE CASCADE)");
         jdbcTemplate.execute("CREATE TABLE IF NOT EXISTS tests (id INT AUTO_INCREMENT PRIMARY KEY, module_id INT NOT NULL, question TEXT NOT NULL, option_a VARCHAR(255), option_b VARCHAR(255), option_c VARCHAR(255), option_d VARCHAR(255), correct_answer VARCHAR(20) DEFAULT 'optionA', FOREIGN KEY (module_id) REFERENCES modules(id) ON DELETE CASCADE)");
         jdbcTemplate.execute("CREATE TABLE IF NOT EXISTS student_progress (id INT AUTO_INCREMENT PRIMARY KEY, user_id INT NOT NULL, module_id INT NOT NULL, completed BOOLEAN DEFAULT FALSE, score INT DEFAULT 0, FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE, FOREIGN KEY (module_id) REFERENCES modules(id) ON DELETE CASCADE)");
-        jdbcTemplate.execute("CREATE TABLE IF NOT EXISTS certificates (id INT AUTO_INCREMENT PRIMARY KEY, user_id INT NOT NULL, domain_id INT NULL, module_id INT NULL, achievement_id INT NULL, issued_date DATE, score INT DEFAULT 0, file_name VARCHAR(255), FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE)");
+        jdbcTemplate.execute("CREATE TABLE IF NOT EXISTS certificates (id INT AUTO_INCREMENT PRIMARY KEY, user_id INT NOT NULL, domain_id INT NULL, module_id INT NULL, attempt_id INT NULL, achievement_id INT NULL, issued_date DATE, score INT DEFAULT 0, file_name VARCHAR(255), FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE)");
         jdbcTemplate.execute("CREATE TABLE IF NOT EXISTS registration_otps (id INT AUTO_INCREMENT PRIMARY KEY, name VARCHAR(100) NOT NULL, email VARCHAR(100) NOT NULL, phone VARCHAR(20) NOT NULL, role VARCHAR(20) NOT NULL, roll_number VARCHAR(50) NOT NULL, department VARCHAR(100) NOT NULL, cohort VARCHAR(50) NOT NULL, otp VARCHAR(6) NOT NULL, expires_at TIMESTAMP NOT NULL)");
         jdbcTemplate.execute("CREATE TABLE IF NOT EXISTS password_reset_otps (id INT AUTO_INCREMENT PRIMARY KEY, email VARCHAR(100) NOT NULL, role VARCHAR(20) NOT NULL, otp VARCHAR(6) NOT NULL, expires_at TIMESTAMP NOT NULL)");
         jdbcTemplate.execute("CREATE TABLE IF NOT EXISTS removed_users (id INT AUTO_INCREMENT PRIMARY KEY, original_user_id INT NOT NULL, name VARCHAR(100), email VARCHAR(100), role VARCHAR(20), roll_number VARCHAR(50), department VARCHAR(100), cohort VARCHAR(50), phone VARCHAR(20), access_status VARCHAR(20), removed_by INT NOT NULL, removed_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP, reason VARCHAR(255))");
@@ -97,7 +104,6 @@ public class PlatformBootstrap implements CommandLineRunner {
     }
 
     private void seedUsers() {
-        String adminHash = passwordEncoder.encode(MAIN_ADMIN_PASSWORD);
         Integer adminId = jdbcTemplate.query(
             "SELECT id FROM users WHERE email = ? OR roll_number = ? ORDER BY id LIMIT 1",
             rs -> rs.next() ? rs.getInt("id") : null,
@@ -105,22 +111,23 @@ public class PlatformBootstrap implements CommandLineRunner {
             "ADMIN001"
         );
         if (adminId == null) {
+            if (defaultAdminPassword == null || defaultAdminPassword.isBlank()) {
+                throw new IllegalStateException("Set DEFAULT_ADMIN_PASSWORD before first startup to create the admin account safely.");
+            }
             jdbcTemplate.update("INSERT INTO users (name, email, password, role, roll_number, department, cohort, phone, password_changed, access_status) VALUES (?, ?, ?, 'ADMIN', ?, ?, ?, ?, TRUE, 'ACTIVE')",
-                "Main Admin", MAIN_ADMIN_EMAIL, adminHash, "ADMIN001", "Administration", "2020-2030", MAIN_ADMIN_PHONE);
+                "Main Admin", MAIN_ADMIN_EMAIL, passwordEncoder.encode(defaultAdminPassword), "ADMIN001", "Administration", "2020-2030", MAIN_ADMIN_PHONE);
         } else {
-            jdbcTemplate.update("UPDATE users SET name=?, email=?, password=?, role='ADMIN', roll_number=?, department=?, cohort=?, phone=?, password_changed=TRUE, access_status='ACTIVE' WHERE id=?",
-                "Main Admin", MAIN_ADMIN_EMAIL, adminHash, "ADMIN001", "Administration", "2020-2030", MAIN_ADMIN_PHONE, adminId);
+            jdbcTemplate.update("UPDATE users SET name=?, email=?, role='ADMIN', roll_number=?, department=?, cohort=?, phone=?, access_status='ACTIVE' WHERE id=?",
+                "Main Admin", MAIN_ADMIN_EMAIL, "ADMIN001", "Administration", "2020-2030", MAIN_ADMIN_PHONE, adminId);
         }
 
-        seedUserIfMissing("manu", PRIMARY_STUDENT_EMAIL, PRIMARY_STUDENT_PASSWORD, "STUDENT", "2400037764", "CSE", "2024-2028", "9876543210", true);
+        seedUserIfMissing("manu", PRIMARY_STUDENT_EMAIL, defaultStudentPassword, "STUDENT", "2400037764", "CSE", "2024-2028", "9876543210", true);
     }
 
     private void seedActivitiesAndLearning() {
-        insertIfMissing("INSERT INTO activities (name, type, role, duration, skills, start_date, end_date, slots) VALUES ('Cricket Tournament','sports','Player','2 days','Teamwork,Leadership,Discipline','2026-04-10','2026-04-12',30)", "SELECT COUNT(*) FROM activities WHERE name='Cricket Tournament'");
-        insertIfMissing("INSERT INTO activities (name, type, role, duration, skills, start_date, end_date, slots) VALUES ('Coding Club','club','Member','1 year','Programming,Problem Solving,Teamwork','2026-01-10','2026-12-10',60)", "SELECT COUNT(*) FROM activities WHERE name='Coding Club'");
-        insertIfMissing("INSERT INTO activities (name, type, role, duration, skills, start_date, end_date, slots) VALUES ('Cultural Fest','cultural','Performer','3 days','Confidence,Expression,Coordination','2026-05-10','2026-05-12',50)", "SELECT COUNT(*) FROM activities WHERE name='Cultural Fest'");
-        insertIfMissing("INSERT INTO activities (name, type, role, duration, skills, start_date, end_date, slots) VALUES ('NSS Community Drive','ncc','Volunteer','1 week','Service,Leadership,Teamwork','2026-06-01','2026-06-07',40)", "SELECT COUNT(*) FROM activities WHERE name='NSS Community Drive'");
-        insertIfMissing("INSERT INTO activities (name, type, role, duration, skills, start_date, end_date, slots) VALUES ('Startup Bootcamp','entrepreneurship','Founder','2 weeks','Ideation,Branding,Risk Management','2026-07-01','2026-07-14',35)", "SELECT COUNT(*) FROM activities WHERE name='Startup Bootcamp'");
+        // Remove hardcoded activities and achievements
+        jdbcTemplate.update("DELETE FROM achievements WHERE title IN ('Cricket Tournament Winner', 'Ui/Ux Workshop Recognition')");
+        jdbcTemplate.update("DELETE FROM activities WHERE name IN ('Cricket Tournament', 'Coding Club', 'Cultural Fest', 'NSS Community Drive', 'Startup Bootcamp')");
 
         Map<String, List<String>> categoryDomains = new LinkedHashMap<>();
         categoryDomains.put("Sports Competitions", List.of("Physical Fitness", "Team Collaboration", "Leadership", "Strategy & Decision Making", "Discipline & Time Management", "Sportsmanship"));
@@ -156,9 +163,6 @@ public class PlatformBootstrap implements CommandLineRunner {
                 }
             }
         }
-
-        insertIfMissing("INSERT INTO achievements (user_id, title, category, activity_category, description, date, certificate) SELECT id, 'Cricket Tournament Winner', 'award', 'sports', 'Won the inter-college cricket tournament', '2026-04-12', 'certificate.pdf' FROM users WHERE email='" + PRIMARY_STUDENT_EMAIL + "'", "SELECT COUNT(*) FROM achievements WHERE title='Cricket Tournament Winner' AND user_id IN (SELECT id FROM users WHERE email='" + PRIMARY_STUDENT_EMAIL + "')");
-        insertIfMissing("INSERT INTO achievements (user_id, title, category, activity_category, description, date, certificate) SELECT id, 'Ui/Ux Workshop Recognition', 'recognition', 'club', 'Recognized for strong contribution to Ui/Ux workshop activities', '2026-04-09', 'uiux-workshop.pdf' FROM users WHERE email='" + PRIMARY_STUDENT_EMAIL + "'", "SELECT COUNT(*) FROM achievements WHERE title='Ui/Ux Workshop Recognition' AND user_id IN (SELECT id FROM users WHERE email='" + PRIMARY_STUDENT_EMAIL + "')");
     }
 
     private void mapExistingDomainActivities() {
@@ -255,15 +259,34 @@ public class PlatformBootstrap implements CommandLineRunner {
 
     private void seedUserIfMissing(String name, String email, String rawPassword, String role, String rollNumber, String department, String cohort, String phone, boolean changed) {
         Integer count = jdbcTemplate.queryForObject("SELECT COUNT(*) FROM users WHERE email = ?", Integer.class, email);
-        String hash = passwordEncoder.encode(rawPassword);
         if (count == null || count == 0) {
+            if (rawPassword == null || rawPassword.isBlank()) {
+                throw new IllegalStateException("Set DEFAULT_STUDENT_PASSWORD before first startup to create the seeded student account safely.");
+            }
             jdbcTemplate.update("INSERT INTO users (name, email, password, role, roll_number, department, cohort, phone, password_changed, access_status) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'ACTIVE')",
-                name, email, hash, role, rollNumber, department, cohort, phone, changed);
+                name, email, passwordEncoder.encode(rawPassword), role, rollNumber, department, cohort, phone, changed);
         } else {
             jdbcTemplate.update(
-                "UPDATE users SET name = ?, password = ?, role = ?, roll_number = ?, department = ?, cohort = ?, phone = ?, password_changed = ?, access_status = 'ACTIVE' WHERE email = ?",
-                name, hash, role, rollNumber, department, cohort, phone, changed, email
+                "UPDATE users SET name = ?, role = ?, roll_number = ?, department = ?, cohort = ?, phone = ?, password_changed = ?, access_status = 'ACTIVE' WHERE email = ?",
+                name, role, rollNumber, department, cohort, phone, changed, email
             );
+        }
+    }
+
+    private void migratePlainTextPasswords() {
+        List<Map<String, Object>> users = jdbcTemplate.query(
+            "SELECT id, password FROM users",
+            (rs, rowNum) -> Map.of("id", rs.getInt("id"), "password", rs.getString("password"))
+        );
+        for (Map<String, Object> user : users) {
+            String password = String.valueOf(user.get("password"));
+            if (password != null && !password.startsWith("$2")) {
+                jdbcTemplate.update(
+                    "UPDATE users SET password = ? WHERE id = ?",
+                    passwordEncoder.encode(password),
+                    user.get("id")
+                );
+            }
         }
     }
 

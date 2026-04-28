@@ -337,7 +337,7 @@ public class PlatformService {
     public List<Map<String, Object>> getActivities(String authHeader) {
         requireAuthenticated(authHeader);
         return jdbcTemplate.query(
-            "SELECT a.id AS activityId, a.name AS activityName, a.type AS activityCategory, a.domain_id AS domainId, d.name AS domainName, a.role, a.duration, a.skills, a.start_date AS startDate, a.end_date AS endDate, a.slots, COUNT(e.id) AS enrolledCount FROM activities a LEFT JOIN domains d ON d.id = a.domain_id LEFT JOIN enrollments e ON e.activity_id = a.id WHERE a.domain_id IS NOT NULL AND a.name IN ('Ui/ Ux workshop', 'Competitive Sports') GROUP BY a.id, a.name, a.type, a.domain_id, d.name, a.role, a.duration, a.skills, a.start_date, a.end_date, a.slots ORDER BY a.start_date DESC, a.id DESC",
+            "SELECT a.id AS activityId, a.name AS activityName, a.type AS activityCategory, a.domain_id AS domainId, d.name AS domainName, a.role, a.duration, a.skills, a.start_date AS startDate, a.end_date AS endDate, a.slots, COUNT(e.id) AS enrolledCount FROM activities a LEFT JOIN domains d ON d.id = a.domain_id LEFT JOIN enrollments e ON e.activity_id = a.id GROUP BY a.id, a.name, a.type, a.domain_id, d.name, a.role, a.duration, a.skills, a.start_date, a.end_date, a.slots ORDER BY a.start_date DESC, a.id DESC",
             (rs, rowNum) -> mapActivity(rs)
         );
     }
@@ -407,7 +407,7 @@ public class PlatformService {
         if (slots != null && enrolledCount != null && enrolledCount >= slots) {
             throw new IllegalArgumentException("Enrollment limit reached for this activity.");
         }
-        jdbcTemplate.update("INSERT INTO enrollments (user_id, activity_id, status, enrolled_date) VALUES (?, ?, 'ENROLLED', ?)", request.studentId(), request.activityId(), Date.valueOf(LocalDate.now()));
+        jdbcTemplate.update("INSERT INTO enrollments (user_id, activity_id, status, enrolled_date, test_access) VALUES (?, ?, 'ENROLLED', ?, TRUE)", request.studentId(), request.activityId(), Date.valueOf(LocalDate.now()));
     }
 
     public List<Map<String, Object>> getParticipations(String authHeader) {
@@ -472,6 +472,10 @@ public class PlatformService {
         }
         jdbcTemplate.update("UPDATE platform_settings SET setting_value = ? WHERE setting_key = 'student_limit'", String.valueOf(request.studentLimit()));
         jdbcTemplate.update("UPDATE platform_settings SET setting_value = ? WHERE setting_key = 'co_admin_limit'", String.valueOf(request.coAdminLimit()));
+    }
+
+    public List<Map<String, Object>> debugDb() {
+        return jdbcTemplate.queryForList("SELECT * FROM test_attempts");
     }
 
     public void approveCoAdmin(String authHeader, CoAdminApprovalRequest request) {
@@ -548,6 +552,16 @@ public class PlatformService {
             "Removed from admin access management"
         );
 
+        String removedRoleLabel = ROLE_CO_ADMIN.equals(role) ? "co-admin" : "student";
+        String removalMailText = "Hello " + user.get("name") + ",\n\n"
+            + "Your " + removedRoleLabel + " account has been removed from the Student Achievement Platform by the main admin.\n"
+            + "You no longer have access to the portal with this account.\n\n"
+            + "Email: " + user.get("email") + "\n"
+            + "Role: " + removedRoleLabel + "\n\n"
+            + "If you believe this was done by mistake, please contact the main admin.\n\n"
+            + "Student Achievement Platform";
+        mailService.sendMail(String.valueOf(user.get("email")), "Account Removed From Student Achievement Platform", removalMailText);
+
         jdbcTemplate.update("DELETE FROM auth_sessions WHERE user_id = ?", userId);
         jdbcTemplate.update("DELETE FROM password_reset_otps WHERE email = ?", user.get("email"));
         jdbcTemplate.update("DELETE FROM registration_otps WHERE email = ?", user.get("email"));
@@ -584,6 +598,37 @@ public class PlatformService {
             (rs, rowNum) -> Map.of("id", rs.getInt("id"), "name", rs.getString("name"), "questionCount", rs.getInt("questionCount")),
             domainId
         );
+    }
+
+    public Map<String, Object> getModuleStudy(String authHeader, Integer moduleId) {
+        requireRole(authHeader, ROLE_STUDENT);
+        Map<String, Object> module = jdbcTemplate.queryForObject(
+            "SELECT m.id, COALESCE(m.name, m.title) AS moduleName, m.content, d.id AS domainId, d.name AS domainName, c.id AS categoryId, c.name AS categoryName FROM modules m JOIN domains d ON d.id = m.domain_id JOIN categories c ON c.id = d.category_id WHERE m.id = ?",
+            (rs, rowNum) -> {
+                Map<String, Object> item = new LinkedHashMap<>();
+                item.put("moduleId", rs.getInt("id"));
+                item.put("moduleName", rs.getString("moduleName"));
+                item.put("domainId", rs.getInt("domainId"));
+                item.put("domainName", rs.getString("domainName"));
+                item.put("categoryId", rs.getInt("categoryId"));
+                item.put("categoryName", rs.getString("categoryName"));
+                item.put("content", rs.getString("content"));
+                return item;
+            },
+            moduleId
+        );
+        String existingContent = String.valueOf(module.getOrDefault("content", ""));
+        String studyContent = existingContent;
+        if (shouldRegenerateStudyContent(existingContent)) {
+            studyContent = buildStudyContent(
+                String.valueOf(module.get("categoryName")),
+                String.valueOf(module.get("domainName")),
+                String.valueOf(module.get("moduleName"))
+            );
+            jdbcTemplate.update("UPDATE modules SET content = ? WHERE id = ?", studyContent, moduleId);
+        }
+        module.put("content", studyContent);
+        return module;
     }
 
     public Map<String, Object> getTests(String authHeader, Integer moduleId) {
@@ -723,24 +768,26 @@ public class PlatformService {
         );
         int attemptsUsed = completedAttempts == null ? 1 : completedAttempts;
         int attemptsLeft = Math.max(0, 2 - attemptsUsed);
-        issueAutomaticCertificateForAttempt(request.attemptId(), score >= 50);
+        boolean passed = score >= 50;
+        issueAutomaticCertificateForAttempt(request.attemptId(), passed);
 
         return Map.of(
-            "message", score >= 50
+            "message", passed
                 ? "Submitted test successfully. Certificate issued to the student."
                 : attemptsLeft > 0
                     ? "Submitted test successfully. You can use your second chance."
                     : "Submitted test successfully. Final not-passed certificate issued to the student.",
             "score", score,
-            "passed", score >= 50,
-            "attemptsLeft", attemptsLeft
+            "passed", passed,
+            "attemptsLeft", attemptsLeft,
+            "certificateIssued", true
         );
     }
 
     public List<Map<String, Object>> getMyTestAttempts(String authHeader) {
         Map<String, Object> actor = requireRole(authHeader, ROLE_STUDENT);
         return jdbcTemplate.query(
-            "SELECT ta.id, ta.module_id AS moduleId, ta.status, ta.total_questions AS totalQuestions, ta.correct_answers AS correctAnswers, ta.score, ta.submitted_at AS submittedAt, ta.certificate_issued AS certificateIssued, cert.id AS certificateId, cert.file_name AS certificateFileName, COALESCE(m.name, m.title) AS moduleName, d.name AS domainName, c.name AS categoryName FROM test_attempts ta JOIN modules m ON m.id = ta.module_id JOIN domains d ON d.id = m.domain_id JOIN categories c ON c.id = d.category_id LEFT JOIN certificates cert ON cert.user_id = ta.user_id AND cert.module_id = ta.module_id WHERE ta.user_id = ? ORDER BY ta.id DESC",
+            "SELECT ta.id, ta.module_id AS moduleId, ta.status, ta.total_questions AS totalQuestions, ta.correct_answers AS correctAnswers, ta.score, ta.submitted_at AS submittedAt, ta.certificate_issued AS certificateIssued, cert.id AS certificateId, cert.file_name AS certificateFileName, COALESCE(m.name, m.title) AS moduleName, d.name AS domainName, c.name AS categoryName FROM test_attempts ta JOIN modules m ON m.id = ta.module_id JOIN domains d ON d.id = m.domain_id JOIN categories c ON c.id = d.category_id LEFT JOIN certificates cert ON cert.attempt_id = ta.id WHERE ta.user_id = ? ORDER BY ta.id DESC",
             (rs, rowNum) -> mapAttempt(rs),
             actor.get("id")
         );
@@ -749,11 +796,12 @@ public class PlatformService {
     public Map<String, Object> getTestAttemptReview(String authHeader, Integer attemptId) {
         Map<String, Object> actor = requireAuthenticated(authHeader);
         Map<String, Object> summary = jdbcTemplate.queryForObject(
-            "SELECT ta.id, ta.user_id AS userId, ta.score, ta.correct_answers AS correctAnswers, ta.total_questions AS totalQuestions, ta.certificate_issued AS certificateIssued, ta.submitted_at AS submittedAt, COALESCE(m.name, m.title) AS moduleName, d.name AS domainName, c.name AS categoryName FROM test_attempts ta JOIN modules m ON m.id = ta.module_id JOIN domains d ON d.id = m.domain_id JOIN categories c ON c.id = d.category_id WHERE ta.id = ? AND ta.status = 'COMPLETED'",
+            "SELECT ta.id, ta.user_id AS userId, u.name AS studentName, ta.score, ta.correct_answers AS correctAnswers, ta.total_questions AS totalQuestions, ta.certificate_issued AS certificateIssued, ta.submitted_at AS submittedAt, COALESCE(m.name, m.title) AS moduleName, d.name AS domainName, c.name AS categoryName FROM test_attempts ta JOIN users u ON u.id = ta.user_id JOIN modules m ON m.id = ta.module_id JOIN domains d ON d.id = m.domain_id JOIN categories c ON c.id = d.category_id WHERE ta.id = ? AND ta.status = 'COMPLETED'",
             (rs, rowNum) -> {
                 Map<String, Object> item = new LinkedHashMap<>();
                 item.put("id", rs.getInt("id"));
                 item.put("userId", rs.getInt("userId"));
+                item.put("studentName", rs.getString("studentName"));
                 item.put("score", rs.getInt("score"));
                 item.put("correctAnswers", rs.getInt("correctAnswers"));
                 item.put("totalQuestions", rs.getInt("totalQuestions"));
@@ -794,7 +842,7 @@ public class PlatformService {
     public List<Map<String, Object>> getTestAttemptsForAdmin(String authHeader) {
         requireRole(authHeader, ROLE_ADMIN, ROLE_CO_ADMIN);
         return jdbcTemplate.query(
-            "SELECT ta.id, ta.user_id AS userId, u.name AS studentName, u.email AS studentEmail, u.roll_number AS rollNumber, ta.module_id AS moduleId, ta.status, ta.total_questions AS totalQuestions, ta.correct_answers AS correctAnswers, ta.score, ta.submitted_at AS submittedAt, ta.certificate_issued AS certificateIssued, cert.id AS certificateId, cert.file_name AS certificateFileName, COALESCE(m.name, m.title) AS moduleName, d.name AS domainName, c.name AS categoryName FROM test_attempts ta JOIN users u ON u.id = ta.user_id JOIN modules m ON m.id = ta.module_id JOIN domains d ON d.id = m.domain_id JOIN categories c ON c.id = d.category_id LEFT JOIN certificates cert ON cert.user_id = ta.user_id AND cert.module_id = ta.module_id WHERE ta.status = 'COMPLETED' ORDER BY ta.id DESC",
+            "SELECT ta.id, ta.user_id AS userId, u.name AS studentName, u.email AS studentEmail, u.roll_number AS rollNumber, ta.module_id AS moduleId, ta.status, ta.total_questions AS totalQuestions, ta.correct_answers AS correctAnswers, ta.score, ta.submitted_at AS submittedAt, ta.certificate_issued AS certificateIssued, cert.id AS certificateId, cert.file_name AS certificateFileName, COALESCE(m.name, m.title) AS moduleName, d.name AS domainName, c.name AS categoryName FROM test_attempts ta JOIN users u ON u.id = ta.user_id JOIN modules m ON m.id = ta.module_id JOIN domains d ON d.id = m.domain_id JOIN categories c ON c.id = d.category_id LEFT JOIN certificates cert ON cert.attempt_id = ta.id WHERE ta.status = 'COMPLETED' ORDER BY ta.id DESC",
             (rs, rowNum) -> {
                 Map<String, Object> item = mapAttempt(rs);
                 item.put("userId", rs.getInt("userId"));
@@ -851,7 +899,7 @@ public class PlatformService {
         byte[] pdf = generateCertificatePdf(attempt, passed);
         String suffix = passed ? "passed" : "not-passed";
         String filename = sanitizeFileName(attempt.get("studentName") + "-" + attempt.get("moduleName") + "-" + suffix + "-certificate.pdf");
-        jdbcTemplate.update("INSERT INTO certificates (user_id, module_id, achievement_id, issued_date, score, file_name) VALUES (?, ?, ?, ?, ?, ?)", attempt.get("userId"), attempt.get("moduleId"), achievementId, Date.valueOf(LocalDate.now()), attempt.get("score"), filename);
+        jdbcTemplate.update("INSERT INTO certificates (user_id, module_id, attempt_id, achievement_id, issued_date, score, file_name) VALUES (?, ?, ?, ?, ?, ?, ?)", attempt.get("userId"), attempt.get("moduleId"), request.attemptId(), achievementId, Date.valueOf(LocalDate.now()), attempt.get("score"), filename);
         jdbcTemplate.update("UPDATE test_attempts SET certificate_issued = TRUE WHERE id = ?", request.attemptId());
         mailService.sendMailWithAttachment(
             String.valueOf(attempt.get("studentEmail")),
@@ -1077,13 +1125,6 @@ public class PlatformService {
     }
 
     private void ensureStudentEnrolledForDomain(Integer userId, Integer domainId, String domainName, String categoryName) {
-        Integer anyAccess = jdbcTemplate.queryForObject(
-            "SELECT COUNT(*) FROM enrollments WHERE user_id = ? AND test_access = TRUE",
-            Integer.class, userId
-        );
-        if (anyAccess != null && anyAccess > 0) {
-            return;
-        }
         Integer directCount = jdbcTemplate.queryForObject(
             "SELECT COUNT(*) FROM enrollments e JOIN activities a ON a.id = e.activity_id WHERE e.user_id = ? AND a.domain_id = ?",
             Integer.class, userId, domainId
@@ -1091,16 +1132,7 @@ public class PlatformService {
         if (directCount != null && directCount > 0) {
             return;
         }
-        Integer categoryEnrollment = jdbcTemplate.queryForObject(
-            "SELECT COUNT(*) FROM enrollments e JOIN activities a ON a.id = e.activity_id WHERE e.user_id = ? AND LOWER(a.type) = LOWER(?)",
-            Integer.class,
-            userId,
-            categoryToActivityType(categoryName)
-        );
-        if (categoryEnrollment != null && categoryEnrollment > 0) {
-            return;
-        }
-        throw new IllegalArgumentException("You must be enrolled and have test access granted before taking this domain test.");
+        throw new IllegalArgumentException("You must enroll in the same domain activity before taking this test.");
     }
 
     private void issueAutomaticCertificateForAttempt(Integer attemptId, boolean passed) {
@@ -1147,25 +1179,30 @@ public class PlatformService {
         String resultText = passed ? "passed" : "not-passed";
         String filename = sanitizeFileName(attempt.get("studentName") + "-" + attempt.get("moduleName") + "-" + resultText + "-certificate.pdf");
         jdbcTemplate.update(
-            "INSERT INTO certificates (user_id, module_id, achievement_id, issued_date, score, file_name) VALUES (?, ?, ?, ?, ?, ?)",
+            "INSERT INTO certificates (user_id, module_id, attempt_id, achievement_id, issued_date, score, file_name) VALUES (?, ?, ?, ?, ?, ?, ?)",
             attempt.get("userId"),
             attempt.get("moduleId"),
+            attemptId,
             achievementId,
             Date.valueOf(LocalDate.now()),
             attempt.get("score"),
             filename
         );
         jdbcTemplate.update("UPDATE test_attempts SET certificate_issued = TRUE WHERE id = ?", attemptId);
-        mailService.sendMailWithAttachment(
-            String.valueOf(attempt.get("studentEmail")),
-            passed ? "Achievement Certificate - " + attempt.get("moduleName") : "Assessment Result Certificate - " + attempt.get("moduleName"),
-            passed
-                ? "Hello " + attempt.get("studentName") + ",\n\nCongratulations. You passed the " + attempt.get("domainName") + " test with " + attempt.get("score") + "%.\nYour certificate PDF is attached.\n\nStudent Achievement Platform"
-                : "Hello " + attempt.get("studentName") + ",\n\nYou completed the " + attempt.get("domainName") + " test with " + attempt.get("score") + "%.\nYour result certificate PDF is attached.\n\nStudent Achievement Platform",
-            pdf,
-            filename,
-            "application/pdf"
-        );
+        try {
+            mailService.sendMailWithAttachment(
+                String.valueOf(attempt.get("studentEmail")),
+                passed ? "Achievement Certificate - " + attempt.get("moduleName") : "Assessment Result Certificate - " + attempt.get("moduleName"),
+                passed
+                    ? "Hello " + attempt.get("studentName") + ",\n\nCongratulations. You passed the " + attempt.get("domainName") + " test with " + attempt.get("score") + "%.\nYour certificate PDF is attached.\n\nStudent Achievement Platform"
+                    : "Hello " + attempt.get("studentName") + ",\n\nYou completed the " + attempt.get("domainName") + " test with " + attempt.get("score") + "%.\nYour result certificate PDF is attached.\n\nStudent Achievement Platform",
+                pdf,
+                filename,
+                "application/pdf"
+            );
+        } catch (Exception e) {
+            System.err.println("Failed to send certificate email: " + e.getMessage());
+        }
     }
 
     private byte[] generateCertificatePdf(Map<String, Object> info, boolean passed) {
@@ -1314,6 +1351,91 @@ public class PlatformService {
             case "Entrepreneurship" -> "entrepreneurship";
             default -> "others";
         };
+    }
+
+    private String buildStudyContent(String categoryName, String domainName, String moduleName) {
+        String context = switch (categoryName) {
+            case "Sports Competitions" -> "fitness routines, pressure situations, team drills, and disciplined match preparation";
+            case "Cultural Events" -> "creative preparation, performance confidence, stage communication, and event coordination";
+            case "NCC / NSS Participation", "NCC/NSS Participation" -> "community responsibility, leadership in service, and structured social impact work";
+            case "Club Activities" -> "project collaboration, technical execution, club operations, and peer coordination";
+            case "Entrepreneurship" -> "idea validation, business planning, communication, and market-oriented decision making";
+            default -> "self-development, practical discipline, and continuous improvement across activities";
+        };
+        String examHint = switch (categoryName) {
+            case "Sports Competitions" -> "In tests, prefer options that show disciplined preparation, teamwork, and ethical participation over impulsive or shortcut behavior.";
+            case "Cultural Events" -> "In tests, prefer options that reflect communication clarity, creativity with structure, and collaborative rehearsal habits.";
+            case "NCC / NSS Participation", "NCC/NSS Participation" -> "In tests, prefer options that show service mindset, coordinated action, responsibility, and leadership through discipline.";
+            case "Club Activities" -> "In tests, prefer options that show planning, problem solving, collaboration, and steady execution with review.";
+            case "Entrepreneurship" -> "In tests, prefer options that balance innovation with validation, risk awareness, market understanding, and decision discipline.";
+            default -> "In tests, prefer options that show structured practice, responsible participation, reflection, and long-term growth.";
+        };
+        return """
+            Page 1: Understanding {domain} in {category}
+            {module} is not only an assessment module; it is a guided preparation journey for students who want real capability in {context}. In this domain, the focus is on how you think, how you prepare, how you respond under challenge, and how you convert learning into repeatable performance. The test is only a final checkpoint. The deeper objective is that every student should leave this module with a method they can use in real activity contexts without dependency on guesswork.
+            
+            Students usually struggle when they treat domain preparation as memorization. In this module, the expected approach is different. You should read each topic as a practical instruction for action. Whenever you learn a concept, link it with one real example from your participation history. This habit creates stronger retention and better test performance because your answers come from understanding, not from temporary memory.
+            
+            Page 2: Core Concepts and Mental Model
+            The mental model for this domain is built on clarity, consistency, and reflection. Clarity means you understand what success looks like before starting work. Consistency means you repeat the right actions even when motivation changes. Reflection means you examine outcomes honestly and improve specific weak areas instead of repeating the same pattern. This three-part model supports both high scoring and long-term growth.
+            
+            In {domain}, students are expected to identify context before action. That includes understanding constraints, timeline, team role, quality expectations, and impact of mistakes. If context is ignored, execution quality drops quickly. If context is understood well, even a simple plan produces strong outcomes. During test preparation, use this same model by reading questions slowly, identifying what the question is really asking, and then selecting the most contextually correct answer.
+            
+            Page 3: Application in Real Student Scenarios
+            A common scenario in {domain} is that a student must perform under limited time with shared responsibility. In such conditions, students who rely on impulse often make avoidable errors. Students who use structured thinking first usually perform better. Before action, define objective. During action, monitor progress. After action, review decisions. This cycle creates stable improvement regardless of category.
+            
+            Another scenario appears when students face peer comparison and pressure. The right response is not speed alone; the right response is controlled execution. In this domain, controlled execution includes preparing essentials in advance, avoiding distractions during activity, and documenting learnings immediately after completion. If you adopt this process in your activity life, your domain answers become naturally stronger because they reflect practiced behavior.
+            
+            {examHint}
+            
+            Page 4: Frequent Errors and Strong Corrections
+            The biggest error pattern is superficial preparation. Students read topics once and assume readiness, then lose marks on applied questions. Correct preparation demands revisiting content with deeper intention: explain each concept in your own words, map it to one practical case, and identify one mistake you previously made in similar contexts. This converts passive reading into active understanding.
+            
+            Another major error is emotional decision making under pressure. In {domain}, stress may push students toward rushed judgments. To correct this, train with deliberate pacing. Read question, identify key phrase, reject weak options, then choose the most principled answer. This method improves accuracy and reduces panic. Consistent use of this method in mock review sessions is usually enough to improve outcome quality significantly.
+            
+            Page 5: Advanced Preparation Strategy
+            At this stage of preparation, your focus should shift from finishing syllabus to demonstrating mastery. Mastery in {domain} means you can explain why one approach is stronger than another, not just identify definitions. Build this by comparing scenarios, discussing choices with peers, and revising mistakes from previous attempts. If a concept feels unclear, return to fundamentals instead of moving ahead with confusion.
+            
+            Use short daily study cycles with clear targets. A practical structure is concept review, scenario analysis, and self-test reflection. Repeat this cycle until your reasoning becomes stable. By the time you attempt the test, you should feel that questions are familiar decision patterns, not surprises. When this readiness level is achieved, performance becomes predictable and confidence becomes natural.
+            
+            A reliable approach for this module is to build one-page daily revision notes. Every note should include concept meaning, one practical campus scenario, one common mistake, and one corrected action. This note-based cycle helps you remember test-relevant logic and improves decision quality while answering MCQs.
+            
+            Page 6: Test Attempt Method and Post-Test Learning
+            During the test, keep decision quality higher than speed. Read each question fully, detect the central idea, and compare options against domain principles from this module. Avoid option selection based on keywords alone. Choose the answer that best aligns with practical correctness. After submission, use the review section to analyze wrong answers carefully. Each wrong answer is feedback for improvement, not failure.
+            
+            This module is complete only when learning continues after the attempt. Whether the result is pass or not passed, the student should carry forward the method learned here into future categories and domains. That continuity is the real value of {module} under {category}.
+
+            Page 7: Deepening Mastery Through Reflection
+            Students who improve quickly in {domain} usually follow a reflective cycle after every learning session. They record what they understood, what remained unclear, and where they made weak decisions. This self-observation improves attention in future study rounds. Reflection should be practical and specific, not generic. Instead of writing I need to improve, identify exactly which concept or situation needs rework and why.
+            
+            In {domain}, reflection becomes powerful when paired with action. If you identify one weakness, immediately connect it with one corrective behavior for the next practice session. Over time, this produces visible improvement in confidence, judgment, and answer quality. The test then becomes an outcome of preparation discipline rather than luck.
+
+            Page 8: Long-Term Domain Readiness
+            Long-term readiness in {domain} is built when students repeatedly apply this module's ideas in their real activities. Concept understanding must move into behavior: how you plan, how you communicate, how you respond under uncertainty, and how you recover from mistakes. These habits are useful beyond this test and create stronger outcomes in future domains as well.
+            
+            Treat this material as a reusable handbook. Revisit it whenever you prepare for a new attempt or when performance drops. Consistent return to fundamentals, followed by guided practice, keeps your growth stable. With this method, every attempt becomes meaningful, and every result contributes to your next improvement cycle.
+            
+            Final readiness checkpoint for {module}: if you can explain the domain process in your own words, apply it in one realistic scenario, and justify why one option is stronger than three alternatives, you are prepared for test-level questions in this domain.
+            """
+            .replace("{domain}", domainName)
+            .replace("{category}", categoryName)
+            .replace("{module}", moduleName)
+            .replace("{context}", context)
+            .replace("{examHint}", examHint);
+    }
+
+    private boolean shouldRegenerateStudyContent(String content) {
+        if (content == null || content.isBlank()) {
+            return true;
+        }
+        String normalized = content.toLowerCase();
+        if (normalized.startsWith("assessment module for ")) {
+            return true;
+        }
+        if (normalized.contains("http://") || normalized.contains("https://") || normalized.contains("source.unsplash.com")) {
+            return true;
+        }
+        return content.length() < 4500;
     }
 
     private String sanitizeFileName(Object raw) {

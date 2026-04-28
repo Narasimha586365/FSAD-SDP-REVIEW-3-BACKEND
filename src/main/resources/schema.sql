@@ -106,7 +106,9 @@ CREATE TABLE IF NOT EXISTS certificates (
   id INT AUTO_INCREMENT PRIMARY KEY,
   user_id INT NOT NULL,
   module_id INT NOT NULL,
+  attempt_id INT,
   issued_date DATE,
   CONSTRAINT fk_certificate_user FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
   CONSTRAINT fk_certificate_module FOREIGN KEY (module_id) REFERENCES modules(id) ON DELETE CASCADE
 );
+ALTER TABLE certificates ADD COLUMN IF NOT EXISTS attempt_id INT;
