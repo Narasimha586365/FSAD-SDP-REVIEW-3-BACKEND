@@ -1,12 +1,18 @@
 package com.fsad.studentachievement.service;
 
+import java.net.URI;
+import java.net.http.HttpClient;
+import java.net.http.HttpRequest;
+import java.net.http.HttpResponse;
+import java.util.Base64;
+import java.util.HashMap;
+import java.util.Map;
+
 import org.springframework.beans.factory.annotation.Value;
-import org.springframework.mail.javamail.JavaMailSender;
-import org.springframework.mail.javamail.MimeMessageHelper;
 import org.springframework.stereotype.Service;
 
-import jakarta.mail.internet.MimeMessage;
-import jakarta.mail.util.ByteArrayDataSource;
+import com.fasterxml.jackson.databind.ObjectMapper;
+
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 
@@ -15,13 +21,17 @@ import lombok.extern.slf4j.Slf4j;
 @Slf4j
 public class MailService {
 
-    private final JavaMailSender mailSender;
-
-    @Value("${mail.enabled:false}")
+    @Value("${mail.enabled:true}")
     private boolean mailEnabled;
 
-    @Value("${mail.from:no-reply@student-achievement.local}")
-    private String fromAddress;
+    @Value("${vercel.email.api.url:https://student-achievement-blush.vercel.app/api/send-email}")
+    private String vercelApiUrl;
+
+    @Value("${vercel.email.secret:SecretVercelKey123!}")
+    private String vercelApiSecret;
+
+    private final ObjectMapper objectMapper = new ObjectMapper();
+    private final HttpClient httpClient = HttpClient.newHttpClient();
 
     public boolean sendMail(String to, String subject, String text) {
         if (!mailEnabled) {
@@ -29,14 +39,28 @@ public class MailService {
             return false;
         }
         try {
-            MimeMessage message = mailSender.createMimeMessage();
-            MimeMessageHelper helper = new MimeMessageHelper(message, false);
-            helper.setFrom(fromAddress);
-            helper.setTo(to);
-            helper.setSubject(subject);
-            helper.setText(text, false);
-            mailSender.send(message);
-            return true;
+            Map<String, Object> payload = new HashMap<>();
+            payload.put("secretKey", vercelApiSecret);
+            payload.put("to", to);
+            payload.put("subject", subject);
+            payload.put("text", text);
+
+            String jsonPayload = objectMapper.writeValueAsString(payload);
+
+            HttpRequest request = HttpRequest.newBuilder()
+                    .uri(URI.create(vercelApiUrl))
+                    .header("Content-Type", "application/json")
+                    .POST(HttpRequest.BodyPublishers.ofString(jsonPayload))
+                    .build();
+
+            HttpResponse<String> response = httpClient.send(request, HttpResponse.BodyHandlers.ofString());
+
+            if (response.statusCode() == 200) {
+                return true;
+            } else {
+                log.error("Failed to send mail via Vercel. Status: {} Response: {}", response.statusCode(), response.body());
+                return false;
+            }
         } catch (Exception exception) {
             log.error("Unable to send mail to {}", to, exception);
             return false;
@@ -49,15 +73,31 @@ public class MailService {
             return false;
         }
         try {
-            MimeMessage message = mailSender.createMimeMessage();
-            MimeMessageHelper helper = new MimeMessageHelper(message, true);
-            helper.setFrom(fromAddress);
-            helper.setTo(to);
-            helper.setSubject(subject);
-            helper.setText(text, false);
-            helper.addAttachment(filename, new ByteArrayDataSource(attachment, contentType));
-            mailSender.send(message);
-            return true;
+            Map<String, Object> payload = new HashMap<>();
+            payload.put("secretKey", vercelApiSecret);
+            payload.put("to", to);
+            payload.put("subject", subject);
+            payload.put("text", text);
+            payload.put("attachmentBase64", Base64.getEncoder().encodeToString(attachment));
+            payload.put("filename", filename);
+            payload.put("contentType", contentType);
+
+            String jsonPayload = objectMapper.writeValueAsString(payload);
+
+            HttpRequest request = HttpRequest.newBuilder()
+                    .uri(URI.create(vercelApiUrl))
+                    .header("Content-Type", "application/json")
+                    .POST(HttpRequest.BodyPublishers.ofString(jsonPayload))
+                    .build();
+
+            HttpResponse<String> response = httpClient.send(request, HttpResponse.BodyHandlers.ofString());
+
+            if (response.statusCode() == 200) {
+                return true;
+            } else {
+                log.error("Failed to send mail with attachment via Vercel. Status: {} Response: {}", response.statusCode(), response.body());
+                return false;
+            }
         } catch (Exception exception) {
             log.error("Unable to send mail with attachment to {}", to, exception);
             return false;
