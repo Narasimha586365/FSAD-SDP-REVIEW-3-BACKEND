@@ -58,6 +58,10 @@ public class PlatformService {
     private final MailService mailService;
     private final Random random = new Random();
 
+    public void pingDb() {
+        jdbcTemplate.execute("SELECT 1");
+    }
+
     public Map<String, Object> login(AuthRequest request) {
         try {
             Map<String, Object> user = jdbcTemplate.queryForObject(

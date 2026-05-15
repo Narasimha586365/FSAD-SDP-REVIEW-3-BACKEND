@@ -43,6 +43,11 @@ public class PlatformController {
 
     @GetMapping("/")
     public ResponseEntity<String> home() {
+        try {
+            platformService.pingDb();
+        } catch (Exception e) {
+            // Ignore DB errors on ping
+        }
         return ResponseEntity.ok("Student Achievement Platform API is running successfully!");
     }
 
